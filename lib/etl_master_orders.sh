@@ -9,7 +9,7 @@ run_master_orders_etl() {
     TRUNCATE TABLE order_items;
   "
 
-  for COUNTRY in OPS TR DE FR NL BE BEFRLU AT DK ES IT SE FI PT CZ HU RO SK UK; do
+  for COUNTRY in  TR DE FR NL BE BEFRLU AT DK ES IT SE FI PT CZ HU RO SK UK OPS ; do
     echo "🔗 Merging orders and items for $COUNTRY ..."
     
   # ⚙️ Check if the store database exists first (safe check)
@@ -33,43 +33,71 @@ run_master_orders_etl() {
 
   NAME_SELECT=$([ "$HAS_NAME" -eq 1 ] && echo "oi.order_item_name" || echo "NULL")
 
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
-    SET SESSION sql_mode = REPLACE(REPLACE(@@sql_mode, 'STRICT_TRANS_TABLES', ''), 'NO_ZERO_DATE', '');
-    INSERT INTO woo_master.orders (
-      order_number_formatted, source_store, order_id, order_date, order_status,
-      customer_id, country_code, channel, site, billing_country, billing_city,
-      units_total, ordered_items_count, ordered_items_skus, payment_method,
-      currency_code, subtotal, gross_total, cogs, total_price,
-      tax_amount, shipping_fee, fee_amount, discount_amount,
-      refunded_amount, ads_spend, logistics_cost, other_costs,
-      net_profit, net_revenue, net_margin
-    )
+run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
+  SET SESSION sql_mode = REPLACE(@@sql_mode, 'ONLY_FULL_GROUP_BY', '');
+
+  INSERT IGNORE INTO woo_master.orders (
+    order_number_formatted, source_store, order_id, order_date, order_status,
+    customer_id, country_code, channel, site, billing_country, billing_city,
+    units_total, ordered_items_count, ordered_items_skus, payment_method,
+    currency_code, subtotal, gross_total, cogs, total_price,
+    tax_amount, shipping_fee, fee_amount, discount_amount,
+    refunded_amount, ads_spend, logistics_cost, other_costs,
+    net_profit, net_revenue, net_margin
+  )
+  SELECT *
+  FROM (
     SELECT
-      COALESCE(NULLIF(TRIM(o.order_number_formatted), ''), CONCAT('ORD', o.order_id)),
-      '$COUNTRY',
-      o.order_id,
-    CASE
-    WHEN o.order_date IS NULL
-        OR TRIM(o.order_date) = ''
-        OR o.order_date IN ('0000-00-00', '0000-00-00 00:00:00')
-    THEN NULL
-    WHEN STR_TO_DATE(o.order_date, '%Y-%m-%d %H:%i:%s') IS NOT NULL
-    THEN STR_TO_DATE(o.order_date, '%Y-%m-%d %H:%i:%s')
-    ELSE NULL
-    END AS order_date,
-      o.order_status, o.customer_id,
-      o.country_code, o.channel, o.site, o.billing_country, o.billing_city,
-      o.units_total, o.ordered_items_count, o.ordered_items_skus, o.payment_method,
-      o.currency_code, o.subtotal, o.gross_total, o.cogs, o.total_price,
-      o.tax_amount, o.shipping_fee, o.fee_amount, o.discount_amount,
-      o.refunded_amount, o.ads_spend, o.logistics_cost, o.other_costs,
-      o.net_profit, o.net_revenue, o.net_margin
+      COALESCE(NULLIF(TRIM(o.order_number_formatted), ''), CONCAT('ORD', o.order_id)) AS order_number_formatted,
+      '$COUNTRY' AS source_store,
+      MIN(o.order_id) AS order_id,
+      MIN(
+        CASE
+          WHEN o.order_date IS NULL
+              OR TRIM(o.order_date) = ''
+              OR o.order_date IN ('0000-00-00', '0000-00-00 00:00:00')
+          THEN NULL
+          WHEN STR_TO_DATE(o.order_date, '%Y-%m-%d %H:%i:%s') IS NOT NULL
+          THEN STR_TO_DATE(o.order_date, '%Y-%m-%d %H:%i:%s')
+          ELSE NULL
+        END
+      ) AS order_date,
+      MAX(o.order_status) AS order_status,
+      MAX(o.customer_id) AS customer_id,
+      MAX(o.country_code) AS country_code,
+      MAX(o.channel) AS channel,
+      MAX(o.site) AS site,
+      MAX(o.billing_country) AS billing_country,
+      MAX(o.billing_city) AS billing_city,
+      MAX(o.units_total) AS units_total,
+      MAX(o.ordered_items_count) AS ordered_items_count,
+      MAX(o.ordered_items_skus) AS ordered_items_skus,
+      MAX(o.payment_method) AS payment_method,
+      MAX(o.currency_code) AS currency_code,
+      MAX(o.subtotal) AS subtotal,
+      MAX(o.gross_total) AS gross_total,
+      MAX(o.cogs) AS cogs,
+      MAX(o.total_price) AS total_price,
+      MAX(o.tax_amount) AS tax_amount,
+      MAX(o.shipping_fee) AS shipping_fee,
+      MAX(o.fee_amount) AS fee_amount,
+      MAX(o.discount_amount) AS discount_amount,
+      MAX(o.refunded_amount) AS refunded_amount,
+      MAX(o.ads_spend) AS ads_spend,
+      MAX(o.logistics_cost) AS logistics_cost,
+      MAX(o.other_costs) AS other_costs,
+      MAX(o.net_profit) AS net_profit,
+      MAX(o.net_revenue) AS net_revenue,
+      MAX(o.net_margin) AS net_margin
     FROM woo_${COUNTRY,,}.orders o
     WHERE o.order_number_formatted IS NOT NULL
       AND o.order_number_formatted <> ''
       AND LENGTH(TRIM(o.order_number_formatted)) > 0
-      AND o.order_number_formatted <> 'NULL';
-  "
+      AND o.order_number_formatted <> 'NULL'
+    GROUP BY o.order_number_formatted
+  ) AS deduped;
+"
+
 
   run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
     INSERT INTO order_items (

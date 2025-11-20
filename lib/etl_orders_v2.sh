@@ -1,0 +1,622 @@
+#!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/utils.sh"
+
+# =========================================================
+# 🧩 WooCommerce ETL per Country
+# =========================================================
+run_etl_v2() {
+  COUNTRY="$1"  
+  # =========================================================
+  # 🟡 1️⃣ Extract Orders
+  # =========================================================
+  echo "📦 Extracting Orders for $COUNTRY ..."
+  # ==========================================
+  # 🌍 Configure remote WooCommerce DB connection
+  # ==========================================
+  IFS=',' read -r HOST DB USER PASS <<< "${REMOTE_DBS[$COUNTRY]}"
+
+  if [ -z "$HOST" ] || [ -z "$DB" ] || [ -z "$USER" ] || [ -z "$PASS" ]; then
+    echo "❌ Missing database credentials for $COUNTRY in REMOTE_DBS."
+    return 1
+  fi
+
+  echo "🔗 Connecting to remote DB for $COUNTRY:"
+  echo "   Host: $HOST"
+  echo "   DB:   $DB"
+
+  # 🆕 With a special conditional tweak for OPS only
+  if [ "$COUNTRY" = "OPS" ]; then
+    echo "🔎 Detected OPS — applying marketplace filters..."
+    EXTRA_FILTER="AND o.ID IN (
+      SELECT post_id FROM wp_postmeta
+      WHERE meta_key='_payment_method' AND meta_value IN ('bol','other')
+    )"
+  else
+    EXTRA_FILTER=""
+  fi
+  # 🧠 Special handling for TR: order_number_formatted = order_id
+  # 🧠 Special handling for TR and Refunds (generate order_number_formatted)
+  if [ "$COUNTRY" = "TR" ]; then
+    echo "⚙️ Using order_id as order_number_formatted for TR (no _order_number_formatted key)..."
+    ORDER_NUMBER_FIELD="CAST(o.ID AS CHAR) AS order_number_formatted"
+  else
+    # Assign country-specific prefix for refunds
+    case "$COUNTRY" in
+      NL) PREFIX="101" ;;
+      BE) PREFIX="201" ;;
+      DE) PREFIX="301" ;;
+      AT) PREFIX="401" ;;
+      BEFR|BEFRLU) PREFIX="241" ;;
+      FR) PREFIX="501" ;;
+      DK) PREFIX="601" ;;
+      SE) PREFIX="901" ;;
+      FI) PREFIX="641" ;;
+      PT) PREFIX="741" ;;
+      ES) PREFIX="701" ;;
+      IT) PREFIX="801" ;;
+      CZ) PREFIX="461" ;;
+      HU) PREFIX="441" ;;
+      RO) PREFIX="531" ;;
+      SK) PREFIX="561" ;;
+      UK) PREFIX="161" ;;
+      OPS) PREFIX="" ;;  # OPS marketplace has no formatted order number
+      *) PREFIX="" ;;
+    esac
+
+    # Build dynamic SQL field for order_number_formatted
+    ORDER_NUMBER_FIELD="CASE
+      WHEN o.type = 'shop_order_refund'
+        THEN CONCAT('$PREFIX', '-REFUND-', CAST(o.ID AS CHAR))
+      ELSE (
+        SELECT meta_value
+        FROM wp_wc_orders_meta
+        WHERE order_id = o.id AND meta_key = '_order_number_formatted'
+        LIMIT 1
+      )
+    END AS order_number_formatted"
+  fi
+
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
+    SELECT DISTINCT
+      $ORDER_NUMBER_FIELD,
+      o.id AS order_id,     
+      o.date_updated_gmt AS order_date,     -- ✅ replaced p.post_date
+      o.status AS order_status,             -- ✅ replaced p.post_status
+      o.customer_id,         
+      '$COUNTRY' AS country_code,
+      'WOO-$COUNTRY' AS channel,
+      -- ✅ replaced _wcst_order_track_http_url meta lookup
+      CASE
+        WHEN '$COUNTRY' = 'TR' THEN 'icgiyimist.com'
+        WHEN '$COUNTRY' = 'OPS' THEN 'ops.mbu-trade.com'
+        WHEN '$COUNTRY' = 'BEFRLU' THEN 'fr.deluxerie.be'
+        WHEN '$COUNTRY' = 'BE' THEN 'deluxerie.be'
+        WHEN '$COUNTRY' = 'NL' THEN 'deluxerie.nl'
+        WHEN '$COUNTRY' = 'DE' THEN 'deluxerie.de'
+        WHEN '$COUNTRY' = 'FR' THEN 'deluxerie.fr'
+        WHEN '$COUNTRY' = 'DK' THEN 'deluxerie.dk'
+        WHEN '$COUNTRY' = 'AT' THEN 'deluxerie.at'
+        WHEN '$COUNTRY' = 'SK' THEN 'deluxerie.sk'
+        WHEN '$COUNTRY' = 'HU' THEN 'deluxerie.hu'
+        WHEN '$COUNTRY' = 'RO' THEN 'deluxerie.ro'
+        WHEN '$COUNTRY' = 'CZ' THEN 'deluxerie.cz'
+        WHEN '$COUNTRY' = 'SE' THEN 'deluxerie.se'
+        WHEN '$COUNTRY' = 'FI' THEN 'deluxerie.fi'
+        WHEN '$COUNTRY' = 'PT' THEN 'deluxerie.pt'
+        WHEN '$COUNTRY' = 'ES' THEN 'deluxerie.es'
+        WHEN '$COUNTRY' = 'IT' THEN 'deluxerie.it'
+        WHEN '$COUNTRY' = 'UK' THEN 'deluxerie.co.uk'
+        ELSE CONCAT('deluxerie.', LOWER('$COUNTRY'))
+      END AS site,
+      addr.country AS billing_country,
+      addr.city AS billing_city,
+
+      COALESCE((
+        SELECT COUNT(DISTINCT COALESCE(NULLIF(pl_v.sku, ''), NULLIF(pl_p.sku, ''), oim_prod.meta_value))
+        FROM wp_woocommerce_order_items oi
+        LEFT JOIN wp_woocommerce_order_itemmeta oim_prod
+          ON oi.order_item_id = oim_prod.order_item_id
+          AND oim_prod.meta_key = '_product_id'
+        LEFT JOIN wp_woocommerce_order_itemmeta oim_var
+          ON oi.order_item_id = oim_var.order_item_id
+          AND oim_var.meta_key = '_variation_id'
+        LEFT JOIN wp_wc_product_meta_lookup pl_p
+          ON pl_p.product_id = CAST(oim_prod.meta_value AS UNSIGNED)
+        LEFT JOIN wp_wc_product_meta_lookup pl_v
+          ON pl_v.product_id = CAST(oim_var.meta_value AS UNSIGNED)
+        WHERE oi.order_item_type = 'line_item'
+          AND oi.order_id = o.ID
+      ), 0) AS units_total,
+
+      -- ✅ Ordered items count
+      COALESCE((
+        SELECT SUM(CAST(oim.meta_value AS DECIMAL(12,2)))
+        FROM wp_woocommerce_order_items oi
+        JOIN wp_woocommerce_order_itemmeta oim
+          ON oi.order_item_id = oim.order_item_id
+        WHERE oi.order_item_type = 'line_item'
+          AND oim.meta_key = '_qty'
+          AND oi.order_id = o.ID
+      ), 0) AS ordered_items_count,
+
+      -- ✅ Ordered item SKUs
+      COALESCE((
+        SELECT GROUP_CONCAT(DISTINCT
+          CASE
+            WHEN (pl_p.sku IS NULL OR pl_p.sku = '') AND (pl_v.sku IS NULL OR pl_v.sku = '')
+              THEN '(Unregistered SKU)'
+            WHEN pl_v.sku IS NOT NULL AND pl_v.sku <> pl_p.sku
+              THEN CONCAT(pl_p.sku, '(', pl_v.sku, ')')
+            ELSE COALESCE(pl_p.sku, pl_v.sku, '(Unregistered SKU)')
+          END SEPARATOR ', ')
+        FROM wp_woocommerce_order_items oi
+        LEFT JOIN wp_woocommerce_order_itemmeta oim_prod
+          ON oi.order_item_id = oim_prod.order_item_id
+          AND oim_prod.meta_key = '_product_id'
+        LEFT JOIN wp_woocommerce_order_itemmeta oim_var
+          ON oi.order_item_id = oim_var.order_item_id
+          AND oim_var.meta_key = '_variation_id'
+        LEFT JOIN wp_wc_product_meta_lookup pl_p
+          ON pl_p.product_id = CAST(oim_prod.meta_value AS UNSIGNED)
+        LEFT JOIN wp_wc_product_meta_lookup pl_v
+          ON pl_v.product_id = CAST(oim_var.meta_value AS UNSIGNED)
+        WHERE oi.order_item_type = 'line_item'
+          AND oi.order_id = o.ID
+      ), '') AS ordered_items_skus,
+
+      o.payment_method AS payment_method,   -- ✅ replaces _payment_method_title
+      o.currency AS currency_code,          -- ✅ replaces _order_currency
+      o.total_amount AS total_price,        -- ✅ replaces _order_total
+
+      -- ✅ Gross Total Calculation
+      COALESCE((
+        (
+          SELECT SUM(CAST(oim.meta_value AS DECIMAL(12,2)))
+          FROM wp_woocommerce_order_items oi
+          JOIN wp_woocommerce_order_itemmeta oim
+            ON oi.order_item_id = oim.order_item_id
+          WHERE oi.order_item_type = 'line_item'
+            AND oim.meta_key = '_line_subtotal'
+            AND oi.order_id = o.ID
+        )
+        + COALESCE(o.tax_amount, 0)
+        + COALESCE((
+          SELECT SUM(CAST(oim.meta_value AS DECIMAL(12,2)))
+          FROM wp_woocommerce_order_items oi
+          JOIN wp_woocommerce_order_itemmeta oim
+            ON oi.order_item_id = oim.order_item_id
+          WHERE oi.order_item_type = 'fee'
+            AND oim.meta_key = '_fee_amount'
+            AND oi.order_id = o.ID
+        ), 0)
+        + COALESCE((
+          SELECT SUM(CAST(oim.meta_value AS DECIMAL(12,2)))
+          FROM wp_woocommerce_order_items oi
+          JOIN wp_woocommerce_order_itemmeta oim
+            ON oi.order_item_id = oim.order_item_id
+          WHERE oi.order_item_type = 'shipping'
+            AND oim.meta_key = 'cost'
+            AND oi.order_id = o.ID
+        ), 0)
+      ), 0) AS gross_total,
+
+      -- ✅ Subtotal
+      COALESCE((
+        SELECT SUM(CAST(oim.meta_value AS DECIMAL(12,4)))
+        FROM wp_woocommerce_order_items oi
+        INNER JOIN wp_woocommerce_order_itemmeta oim
+          ON oi.order_item_id = oim.order_item_id
+        WHERE oi.order_item_type = 'line_item'
+          AND oim.meta_key = '_line_subtotal'
+          AND oi.order_id = o.ID
+      ), 0) AS subtotal,
+
+      -- ✅ new: get cogs from _alg_wc_cog_order_items_cost in wp_wc_orders_meta
+      COALESCE((
+        SELECT CAST(meta_value AS DECIMAL(12,2))
+        FROM wp_wc_orders_meta
+        WHERE order_id = o.id AND meta_key = '_alg_wc_cog_order_items_cost'
+        LIMIT 1
+      ), 0) AS cogs,
+
+
+      o.tax_amount AS tax_amount,  -- ✅ direct column instead of meta lookup
+
+      -- ✅ new: shipping_fee from _alg_wc_cog_order_shipping_cost
+      COALESCE((
+        SELECT op.shipping_total_amount
+        FROM wp_wc_order_operational_data op
+        WHERE op.order_id = o.id
+        LIMIT 1
+      ), 0) AS shipping_fee,
+
+
+      -- ✅ new: fee_amount from _alg_wc_cog_order_fees
+      COALESCE((
+        SELECT CAST(meta_value AS DECIMAL(12,2))
+        FROM wp_wc_orders_meta
+        WHERE order_id = o.id AND meta_key = '_alg_wc_cog_order_fees'
+        LIMIT 1
+      ), 0) AS fee_amount,
+
+      -- ✅ new: discount_amount parsed from serialized data
+      COALESCE((
+        SELECT op.discount_total_amount
+        FROM wp_wc_order_operational_data op
+        WHERE op.order_id = o.id
+        LIMIT 1
+      ), 0) AS discount_amount,
+
+      -- ✅ new: refunded_amount from wp_wc_orders_meta
+      COALESCE((
+        SELECT CAST(meta_value AS DECIMAL(12,2))
+        FROM wp_wc_orders_meta
+        WHERE order_id = o.id AND meta_key = '_refund_amount'
+        LIMIT 1
+      ), 0) AS refunded_amount,
+
+      0 AS ads_spend,
+      0 AS logistics_cost,
+      0 AS other_costs,
+
+      -- ✅ new: profit and margin fields from meta
+      COALESCE((
+        SELECT CAST(meta_value AS DECIMAL(12,2))
+        FROM wp_wc_orders_meta
+        WHERE order_id = o.id AND meta_key = '_alg_wc_cog_order_profit'
+        LIMIT 1
+      ), 0) AS net_profit,
+
+      -- ✅ net_revenue logic reused from original ETL
+      ROUND(
+        COALESCE(o.total_amount, 0)
+        - COALESCE((
+            SELECT CAST(meta_value AS DECIMAL(12,2))
+            FROM wp_wc_orders_meta
+            WHERE order_id = o.id AND meta_key = '_alg_wc_cog_order_items_cost'
+            LIMIT 1
+          ), 0)
+        - COALESCE((
+            SELECT op.discount_total_amount
+            FROM wp_wc_order_operational_data op
+            WHERE op.order_id = o.id
+            LIMIT 1
+          ), 0)
+        - COALESCE((
+            SELECT CAST(meta_value AS DECIMAL(12,2))
+            FROM wp_wc_orders_meta
+            WHERE order_id = o.id AND meta_key = '_refund_amount'
+            LIMIT 1
+          ), 0)
+        - 0   -- ads_spend placeholder
+        - 0   -- logistics_cost placeholder
+        - 0   -- other_costs placeholder
+      , 2) AS net_revenue,
+
+
+      -- ✅ new: net_margin from meta
+      COALESCE((
+        SELECT CAST(meta_value AS DECIMAL(12,2))
+        FROM wp_wc_orders_meta
+        WHERE order_id = o.id AND meta_key = '_alg_wc_cog_order_profit_margin'
+        LIMIT 1
+      ), 0) AS net_margin
+
+    FROM wp_wc_orders o    
+    LEFT JOIN wp_wc_orders_meta ON wp_wc_orders_meta.order_id = o.id
+    LEFT JOIN wp_wc_order_addresses addr   
+    ON addr.order_id = o.id AND addr.address_type = 'billing'
+    $EXTRA_FILTER
+    GROUP BY o.id;
+  " > "temp_${COUNTRY}_orders.tsv"
+
+  echo "📥 Loading Orders into local DB..."
+  echo "🧱 Ensuring local database woo_${COUNTRY,,} exists..."
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
+    CREATE DATABASE IF NOT EXISTS woo_${COUNTRY,,};
+  "
+
+  # =========================================================
+  # 📥 Load Orders into Local Database
+  # =========================================================
+  echo "🧱 Ensuring tables exist in woo_${COUNTRY,,}..."
+  if [ "$COUNTRY" != "TR" ]; then
+    run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
+      USE woo_${COUNTRY,,};
+      DROP TABLE IF EXISTS orders;
+      CREATE TABLE IF NOT EXISTS orders LIKE woo_tr.orders;
+    "
+  else
+    echo "⚙️ Skipping table clone for TR (base schema already exists)."
+  fi
+
+
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_${COUNTRY,,}" "
+    USE woo_${COUNTRY,,};
+    TRUNCATE TABLE orders;
+    LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_orders.tsv'
+    INTO TABLE orders
+    FIELDS TERMINATED BY '\t'
+    LINES TERMINATED BY '\n'
+    IGNORE 1 LINES
+    (
+      order_number_formatted, order_id, order_date, order_status, customer_id, country_code, channel, site,
+      billing_country, billing_city, units_total, ordered_items_count,
+      ordered_items_skus, payment_method, currency_code, total_price,
+      gross_total, subtotal, cogs, tax_amount, shipping_fee, fee_amount,
+      discount_amount, refunded_amount, ads_spend, logistics_cost,
+      other_costs, net_profit, net_revenue, net_margin
+    );
+  "
+  rm -f "temp_${COUNTRY}_orders.tsv"
+  echo "✅ Orders for $COUNTRY loaded successfully."
+
+
+  # =========================================================
+  # 🟡 2️⃣ Extract Order Items (No SKU Yet)
+  # =========================================================
+  echo "📦 Extracting Order Items for $COUNTRY ..."
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
+    SELECT
+      oi.order_item_id,
+      oi.order_id,
+      MAX(CASE WHEN oim.meta_key = '_product_id' THEN oim.meta_value END) AS product_id,
+      MAX(CASE WHEN oim.meta_key = '_variation_id' THEN oim.meta_value END) AS variation_id,
+      '' AS sku,
+      oi.order_item_name,
+      MAX(CASE WHEN oim.meta_key = '_qty' THEN oim.meta_value END) AS quantity,
+      MAX(CASE WHEN oim.meta_key = '_line_total' THEN oim.meta_value END) AS line_total,
+      MAX(CASE WHEN oim.meta_key = '_line_tax' THEN oim.meta_value END) AS line_tax,
+      MAX(CASE WHEN oim.meta_key = '_refunded_item_id' THEN oim.meta_value END) AS refund_reference,
+      o.currency AS currency_code,
+      o.date_created_gmt AS created_at
+    FROM wp_woocommerce_order_items oi
+    LEFT JOIN wp_woocommerce_order_itemmeta oim
+      ON oi.order_item_id = oim.order_item_id
+    LEFT JOIN wp_wc_orders o
+      ON oi.order_id = o.ID
+    WHERE oi.order_item_type = 'line_item'
+    GROUP BY oi.order_item_id, oi.order_id, oi.order_item_name;
+  " > "temp_${COUNTRY}_order_items.tsv"
+
+  echo "📥 Loading Order Items (no SKU yet) into local DB..."
+  if [ "$COUNTRY" != "TR" ]; then
+    echo "🧱 Creating table order_items in woo_${COUNTRY,,}..."
+    run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_${COUNTRY,,}" "
+      USE woo_${COUNTRY,,};
+      CREATE TABLE IF NOT EXISTS order_items LIKE woo_tr.order_items;
+      TRUNCATE TABLE order_items;
+      LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_order_items.tsv'
+      INTO TABLE order_items
+      FIELDS TERMINATED BY '\t'
+      LINES TERMINATED BY '\n'
+      IGNORE 1 LINES;
+    "
+  else
+    echo "⚙️ Skipping schema clone for TR (base schema already exists)."
+    run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_tr" "
+      TRUNCATE TABLE order_items;
+      LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_order_items.tsv'
+      INTO TABLE order_items
+      FIELDS TERMINATED BY '\t'
+      LINES TERMINATED BY '\n'
+      IGNORE 1 LINES;
+    "
+  fi
+
+  rm -f "temp_${COUNTRY}_order_items.tsv"
+  echo "✅ Order Items for $COUNTRY loaded successfully."
+
+
+  # =========================================================
+  # 🟢 3️⃣ Update SKUs from PIM Database
+  # =========================================================
+  echo "🔍 Updating SKU values in order_items from PIM ..."
+  run_mysql_query "188.68.58.232" "bi-dashboard-pim" "5rB4gGW6K76tu6A2gWXs" "mbu-trade-pim" "
+    SELECT product_id, sku
+    FROM wp_wc_product_meta_lookup
+    WHERE sku IS NOT NULL AND sku <> '';
+  " > temp_pim_sku.tsv
+
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_${COUNTRY,,}" "
+    USE woo_${COUNTRY,,};
+    DROP TABLE IF EXISTS pim_sku_map;
+    CREATE TABLE pim_sku_map (
+      product_id BIGINT PRIMARY KEY,
+      sku VARCHAR(100)
+    );
+    LOAD DATA LOCAL INFILE '$(pwd)/temp_pim_sku.tsv'
+    INTO TABLE pim_sku_map
+    FIELDS TERMINATED BY '\t'
+    LINES TERMINATED BY '\n'
+    IGNORE 1 LINES;
+  "
+
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
+    USE woo_${COUNTRY,,};
+    UPDATE order_items oi
+    LEFT JOIN pim_sku_map ps_parent ON ps_parent.product_id = oi.product_id
+    LEFT JOIN pim_sku_map ps_var ON ps_var.product_id = oi.variation_id
+    SET oi.sku = CASE
+      WHEN oi.variation_id IS NULL OR oi.variation_id = 0 THEN ps_parent.sku
+      WHEN ps_parent.sku IS NULL THEN ps_var.sku
+      WHEN ps_var.sku IS NULL THEN ps_parent.sku
+      ELSE CONCAT(ps_parent.sku, '(', ps_var.sku, ')')
+    END;
+    DROP TABLE IF EXISTS pim_sku_map;
+  "
+  rm -f temp_pim_sku.tsv
+  echo "✅ SKU values updated successfully for $COUNTRY."
+  
+
+  
+  # =========================================================
+  # 🟢 4️⃣ Extract and Build Customers Table (per store)
+  # =========================================================
+  echo "👤 Extracting and aggregating Customers for $COUNTRY ..."
+
+  # Step 1️⃣: Extract base customer info
+  echo "HST: $HOST, USER: $USER, DB: $DB"
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
+    SET sql_mode = REPLACE(@@sql_mode, 'NO_ZERO_DATE', '');
+    SET sql_mode = REPLACE(@@sql_mode, 'NO_ZERO_IN_DATE', '');
+    SELECT
+      u.ID AS customer_id,
+      CASE
+        WHEN (fn.meta_value IS NOT NULL AND fn.meta_value <> '') 
+          OR (ln.meta_value IS NOT NULL AND ln.meta_value <> '') THEN
+            TRIM(CONCAT_WS(' ', fn.meta_value, ln.meta_value))
+        WHEN (bfn.meta_value IS NOT NULL AND bfn.meta_value <> '') 
+          OR (bln.meta_value IS NOT NULL AND bln.meta_value <> '') THEN
+            TRIM(CONCAT_WS(' ', bfn.meta_value, bln.meta_value))
+        ELSE
+            TRIM(CONCAT_WS(' ', sfn.meta_value, sln.meta_value))
+      END AS full_name,
+      LOWER(u.user_email) AS email,
+      bp.meta_value AS phone,
+      IF(u.user_registered = CAST('0000-00-00 00:00:00' AS CHAR), NULL, u.user_registered) AS registered_at,
+      bc.meta_value AS billing_country,
+      bci.meta_value AS billing_city
+    FROM wp_users u
+    LEFT JOIN wp_usermeta fn  ON u.ID = fn.user_id  AND fn.meta_key  = 'first_name'
+    LEFT JOIN wp_usermeta ln  ON u.ID = ln.user_id  AND ln.meta_key  = 'last_name'
+    LEFT JOIN wp_usermeta bfn ON u.ID = bfn.user_id AND bfn.meta_key = 'billing_first_name'
+    LEFT JOIN wp_usermeta bln ON u.ID = bln.user_id AND bln.meta_key = 'billing_last_name'
+    LEFT JOIN wp_usermeta sfn ON u.ID = sfn.user_id AND sfn.meta_key = 'shipping_first_name'
+    LEFT JOIN wp_usermeta sln ON u.ID = sln.user_id AND sln.meta_key = 'shipping_last_name'
+    LEFT JOIN wp_usermeta bp  ON u.ID = bp.user_id  AND bp.meta_key  = 'billing_phone'
+    LEFT JOIN wp_usermeta bc  ON u.ID = bc.user_id  AND bc.meta_key  = 'billing_country'
+    LEFT JOIN wp_usermeta bci ON u.ID = bci.user_id AND bci.meta_key = 'billing_city';
+  " > "temp_${COUNTRY}_customers_base.tsv"
+  echo "📊 $(wc -l < temp_${COUNTRY}_customers_base.tsv) rows in base TSV"
+
+  # Step 2️⃣: Aggregate order metrics
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "  
+    SELECT
+      o.customer_id AS customer_id,
+      MIN(o.date_created_gmt) AS first_order_date,
+      MAX(o.date_created_gmt) AS last_order_date,
+      COUNT(o.ID) AS orders_count,
+      SUM(total_amount) AS ltv
+    FROM wp_wc_orders o
+    GROUP BY customer_id;
+  " > "temp_${COUNTRY}_orders_agg.tsv"
+  echo "📊 $(wc -l < temp_${COUNTRY}_orders_agg.tsv) rows in orders agg TSV"
+
+  # Step 3️⃣: Aggregate units sold
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
+    SELECT
+      o.customer_id AS customer_id,
+      SUM(CASE WHEN oi.order_item_type = 'line_item' THEN 1 ELSE 0 END) AS units_total
+    FROM wp_wc_orders o
+    JOIN wp_woocommerce_order_items oi ON o.ID = oi.order_id
+    GROUP BY o.customer_id;
+  " > "temp_${COUNTRY}_units_agg.tsv"
+  echo "📊 $(wc -l < temp_${COUNTRY}_units_agg.tsv) rows in units agg TSV"
+
+  # Step 3b️⃣: Aggregate refunds
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
+    SELECT 
+      parent.customer_id,
+      COALESCE(SUM(ABS(refund.total_amount)), 0) AS refunds_total
+    FROM wp_wc_orders refund
+    JOIN wp_wc_orders parent 
+      ON refund.parent_order_id = parent.id
+    WHERE refund.type = 'shop_order_refund'
+    GROUP BY parent.customer_id;
+  " > "temp_${COUNTRY}_refunds_agg.tsv"
+  echo "📊 $(wc -l < temp_${COUNTRY}_refunds_agg.tsv) rows in refunds agg TSV"
+
+  # Step 4️⃣: Merge and load into local DB
+  echo "📥 Loading combined Customers data into woo_${COUNTRY,,}.customers ..."
+
+  if [ "$COUNTRY" != "TR" ]; then
+    run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
+      USE woo_${COUNTRY,,};
+      CREATE TABLE IF NOT EXISTS customers LIKE woo_tr.customers;
+      TRUNCATE TABLE customers;
+    "
+  else
+    echo "⚙️ Skipping schema clone for TR (base schema already exists)."
+    run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
+      USE woo_tr;
+      TRUNCATE TABLE customers;
+    "
+  fi
+
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
+    USE woo_${COUNTRY,,};
+    CREATE TEMPORARY TABLE base (
+      customer_id BIGINT, full_name VARCHAR(255), email VARCHAR(255),
+      phone VARCHAR(50), registered_at DATETIME,
+      billing_country VARCHAR(100), billing_city VARCHAR(100)
+    );
+    SET sql_mode = REPLACE(REPLACE(@@sql_mode,'NO_ZERO_DATE',''),'NO_ZERO_IN_DATE','');
+    LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_customers_base.tsv'
+    INTO TABLE base
+    FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' IGNORE 1 LINES;
+
+    CREATE TEMPORARY TABLE orders_agg (
+      customer_id BIGINT, first_order_date DATETIME,
+      last_order_date DATETIME, orders_count INT, ltv DECIMAL(12,2)
+    );
+    LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_orders_agg.tsv'
+    INTO TABLE orders_agg
+    FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' IGNORE 1 LINES;
+
+    CREATE TEMPORARY TABLE units_agg (customer_id BIGINT, units_total INT);
+    LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_units_agg.tsv'
+    INTO TABLE units_agg
+    FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' IGNORE 1 LINES;
+
+    CREATE TEMPORARY TABLE refunds_agg (customer_id BIGINT, refunds_total DECIMAL(12,2));
+    LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_refunds_agg.tsv'
+    INTO TABLE refunds_agg
+    FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' IGNORE 1 LINES;
+
+    INSERT INTO customers (
+      customer_id, full_name, email, phone, registered_at,
+      first_order_date, last_order_date,
+      orders_count, units_total, ltv, aov,
+      refunds_total, source_store,
+      billing_country, billing_city
+    )
+    SELECT
+      b.customer_id,
+      MAX(b.full_name) AS full_name,
+      MAX(b.email) AS email,
+      MAX(b.phone) AS phone,
+      MAX(b.registered_at) AS registered_at,
+      MAX(o.first_order_date) AS first_order_date,
+      MAX(o.last_order_date) AS last_order_date,
+      COALESCE(SUM(o.orders_count), 0) AS orders_count,
+      COALESCE(SUM(u.units_total), 0) AS units_total,
+      COALESCE(SUM(o.ltv), 0) AS ltv,
+      CASE WHEN COALESCE(SUM(o.orders_count), 0) > 0
+           THEN ROUND(SUM(o.ltv) / SUM(o.orders_count), 2)
+           ELSE 0 END AS aov,
+      COALESCE(SUM(r.refunds_total), 0) AS refunds_total,
+      '$COUNTRY' AS source_store,
+      MAX(b.billing_country) AS billing_country,
+      MAX(b.billing_city) AS billing_city
+    FROM base b
+    LEFT JOIN orders_agg  o ON b.customer_id = o.customer_id
+    LEFT JOIN units_agg   u ON b.customer_id = u.customer_id
+    LEFT JOIN refunds_agg r ON b.customer_id = r.customer_id
+    GROUP BY b.customer_id;
+
+    DROP TEMPORARY TABLE base;
+    DROP TEMPORARY TABLE orders_agg;
+    DROP TEMPORARY TABLE units_agg;
+    DROP TEMPORARY TABLE refunds_agg;
+  "
+
+  rm -f "temp_${COUNTRY}_customers_base.tsv" \
+        "temp_${COUNTRY}_orders_agg.tsv" \
+        "temp_${COUNTRY}_units_agg.tsv" \
+        "temp_${COUNTRY}_refunds_agg.tsv"
+
+
+
+  echo "✅ Customers table built successfully for $COUNTRY."
+}

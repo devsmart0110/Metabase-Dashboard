@@ -6,6 +6,7 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_ROOT_HOST: "%"
+      BINLOG_EXPIRE_LOGS_SECONDS: 604800
     ports:
       - "3306:3306"
     volumes:

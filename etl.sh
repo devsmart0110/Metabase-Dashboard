@@ -11,6 +11,7 @@ source "$SCRIPT_DIR/lib/etl_ads_insights.sh"
 # Load all ETL modules
 for module in \
   etl_orders \
+  etl_orders_v2 \
   etl_master_products \
   etl_master_customers \
   etl_master_orders \
@@ -19,6 +20,7 @@ for module in \
   etl_master_gallery \
   etl_master_images \
   etl_return_by_product \
+  etl_eur_orders \
   etl_ads_insights; do
   source "$SCRIPT_DIR/lib/${module}.sh"
 done
@@ -26,19 +28,23 @@ done
 # =========================================================
 # 🚀 Execute All ETL Steps
 # =========================================================
-#for COUNTRY in TR DE FR NL BE AT BEFRLU DK ES IT SE FI PT CZ HU RO SK UK OPS; do
-#  run_etl "$COUNTRY"
-#done
+for COUNTRY in  TR NL HU DE FR BE AT BEFRLU DK ES IT SE FI PT CZ RO SK UK; do
+  run_etl_v2 "$COUNTRY"
+done
+run_etl OPS
 #run_etl TR
 #run_etl DE
-#run_master_products_etl
+#run_etl_v2 TR
+#run_etl_v2 NL
+#run_etl_v2 HU
+run_master_products_etl
 run_master_customers_etl
-#run_master_returns_etl
-#run_return_by_product_etl
-#run_master_orders_etl
-#run_eur_orders_etl
-#run_master_categories_tags_etl
-#run_master_product_gallery_map_etl
-#run_master_product_images_etl
-#run_ads_insights_etl
+run_master_returns_etl
+run_return_by_product_etl
+run_master_orders_etl
+run_eur_orders_etl
+run_master_categories_tags_etl
+run_master_product_gallery_map_etl
+run_master_product_images_etl
+run_ads_insights_etl
 echo "🎯 All ETL operations completed successfully."

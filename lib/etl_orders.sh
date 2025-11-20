@@ -80,13 +80,28 @@ run_etl() {
       MAX(CASE WHEN pm.meta_key = '_customer_user' THEN pm.meta_value END) AS customer_id,
       '$COUNTRY' AS country_code,
       'WOO-$COUNTRY' AS channel,
-      SUBSTRING_INDEX(
-        SUBSTRING_INDEX(
-          MAX(CASE WHEN pm.meta_key = '_wcst_order_track_http_url' THEN pm.meta_value END),
-          '/', 3
-        ),
-        '/', -1
-      ) AS source_site,
+      CASE
+        WHEN '$COUNTRY' = 'TR' THEN 'icgiyimist.com'
+        WHEN '$COUNTRY' = 'OPS' THEN 'ops.mbu-trade.com'
+        WHEN '$COUNTRY' = 'BEFRLU' THEN 'fr.deluxerie.be'
+        WHEN '$COUNTRY' = 'BE' THEN 'deluxerie.be'
+        WHEN '$COUNTRY' = 'NL' THEN 'deluxerie.nl'
+        WHEN '$COUNTRY' = 'DE' THEN 'deluxerie.de'
+        WHEN '$COUNTRY' = 'FR' THEN 'deluxerie.fr'
+        WHEN '$COUNTRY' = 'DK' THEN 'deluxerie.dk'
+        WHEN '$COUNTRY' = 'AT' THEN 'deluxerie.at'
+        WHEN '$COUNTRY' = 'SK' THEN 'deluxerie.sk'
+        WHEN '$COUNTRY' = 'HU' THEN 'deluxerie.hu'
+        WHEN '$COUNTRY' = 'RO' THEN 'deluxerie.ro'
+        WHEN '$COUNTRY' = 'CZ' THEN 'deluxerie.cz'
+        WHEN '$COUNTRY' = 'SE' THEN 'deluxerie.se'
+        WHEN '$COUNTRY' = 'FI' THEN 'deluxerie.fi'
+        WHEN '$COUNTRY' = 'PT' THEN 'deluxerie.pt'
+        WHEN '$COUNTRY' = 'ES' THEN 'deluxerie.es'
+        WHEN '$COUNTRY' = 'IT' THEN 'deluxerie.it'
+        WHEN '$COUNTRY' = 'UK' THEN 'deluxerie.co.uk'
+        ELSE CONCAT('deluxerie.', LOWER('$COUNTRY'))
+      END AS site,
       MAX(CASE WHEN pm.meta_key = '_billing_country' THEN pm.meta_value END) AS billing_country,
       MAX(CASE WHEN pm.meta_key = '_billing_city' THEN pm.meta_value END) AS billing_city,
 
@@ -285,7 +300,7 @@ run_etl() {
       other_costs, net_profit, net_revenue, net_margin
     );
   "
-  rm -f "temp_${COUNTRY}_orders.tsv"
+#  rm -f "temp_${COUNTRY}_orders.tsv"
   echo "✅ Orders for $COUNTRY loaded successfully."
 
 
@@ -683,6 +698,8 @@ run_etl() {
         "temp_${COUNTRY}_orders_agg.tsv" \
         "temp_${COUNTRY}_units_agg.tsv" \
         "temp_${COUNTRY}_refunds_agg.tsv"
+
+
 
   echo "✅ Customers table built successfully for $COUNTRY."
 }
