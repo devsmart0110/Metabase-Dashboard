@@ -81,26 +81,26 @@ run_etl() {
       '$COUNTRY' AS country_code,
       'WOO-$COUNTRY' AS channel,
       CASE
-        WHEN '$COUNTRY' = 'TR' THEN 'icgiyimist.com'
-        WHEN '$COUNTRY' = 'OPS' THEN 'ops.mbu-trade.com'
-        WHEN '$COUNTRY' = 'BEFRLU' THEN 'fr.deluxerie.be'
-        WHEN '$COUNTRY' = 'BE' THEN 'deluxerie.be'
-        WHEN '$COUNTRY' = 'NL' THEN 'deluxerie.nl'
-        WHEN '$COUNTRY' = 'DE' THEN 'deluxerie.de'
-        WHEN '$COUNTRY' = 'FR' THEN 'deluxerie.fr'
-        WHEN '$COUNTRY' = 'DK' THEN 'deluxerie.dk'
-        WHEN '$COUNTRY' = 'AT' THEN 'deluxerie.at'
-        WHEN '$COUNTRY' = 'SK' THEN 'deluxerie.sk'
-        WHEN '$COUNTRY' = 'HU' THEN 'deluxerie.hu'
-        WHEN '$COUNTRY' = 'RO' THEN 'deluxerie.ro'
-        WHEN '$COUNTRY' = 'CZ' THEN 'deluxerie.cz'
-        WHEN '$COUNTRY' = 'SE' THEN 'deluxerie.se'
-        WHEN '$COUNTRY' = 'FI' THEN 'deluxerie.fi'
-        WHEN '$COUNTRY' = 'PT' THEN 'deluxerie.pt'
-        WHEN '$COUNTRY' = 'ES' THEN 'deluxerie.es'
-        WHEN '$COUNTRY' = 'IT' THEN 'deluxerie.it'
-        WHEN '$COUNTRY' = 'UK' THEN 'deluxerie.co.uk'
-        ELSE CONCAT('deluxerie.', LOWER('$COUNTRY'))
+        WHEN '$COUNTRY' = 'TR' THEN 'https://www.icgiyimist.com'
+        WHEN '$COUNTRY' = 'OPS' THEN 'https://ops.mbu-trade.com'
+        WHEN '$COUNTRY' = 'BEFRLU' THEN 'https://fr.deluxerie.be'
+        WHEN '$COUNTRY' = 'BE' THEN 'https://www.deluxerie.be'
+        WHEN '$COUNTRY' = 'NL' THEN 'https://www.deluxerie.nl'
+        WHEN '$COUNTRY' = 'DE' THEN 'https://www.deluxerie.de'
+        WHEN '$COUNTRY' = 'FR' THEN 'https://www.deluxerie.fr'
+        WHEN '$COUNTRY' = 'DK' THEN 'https://www.deluxerie.dk'
+        WHEN '$COUNTRY' = 'AT' THEN 'https://www.deluxerie.at'
+        WHEN '$COUNTRY' = 'SK' THEN 'https://www.deluxerie.sk'
+        WHEN '$COUNTRY' = 'HU' THEN 'https://www.deluxerie.hu'
+        WHEN '$COUNTRY' = 'RO' THEN 'https://www.deluxerie.ro'
+        WHEN '$COUNTRY' = 'CZ' THEN 'https://www.deluxerie.cz'
+        WHEN '$COUNTRY' = 'SE' THEN 'https://www.deluxerie.se'
+        WHEN '$COUNTRY' = 'FI' THEN 'https://www.deluxerie.fi'
+        WHEN '$COUNTRY' = 'PT' THEN 'https://www.deluxerie.pt'
+        WHEN '$COUNTRY' = 'ES' THEN 'https://www.deluxerie.es'
+        WHEN '$COUNTRY' = 'IT' THEN 'https://www.deluxerie.it'
+        WHEN '$COUNTRY' = 'UK' THEN 'https://www.deluxerie.co.uk'
+        ELSE CONCAT('https://www.deluxerie.', LOWER('$COUNTRY'))
       END AS site,
       MAX(CASE WHEN pm.meta_key = '_billing_country' THEN pm.meta_value END) AS billing_country,
       MAX(CASE WHEN pm.meta_key = '_billing_city' THEN pm.meta_value END) AS billing_city,
