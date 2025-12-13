@@ -80,7 +80,7 @@ run_etl_v2() {
     SELECT DISTINCT
       $ORDER_NUMBER_FIELD,
       o.id AS order_id,     
-      o.date_updated_gmt AS order_date,     -- ✅ replaced p.post_date
+      o.date_created_gmt AS order_date,     -- ✅ replaced p.post_date
       o.status AS order_status,             -- ✅ replaced p.post_status
       o.customer_id,         
       '$COUNTRY' AS country_code,
